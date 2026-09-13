@@ -1,6 +1,6 @@
 # DOTV Item Description (Beauty)
 
-A Tampermonkey userscript for [Dragons of the Void](https://play.dragonsofthevoid.com/) that enhances item and magic tooltips: customizable colors and width, per-unit/conditional/distinct item tracking for damage-average math, and (planned) item drop-location lookup and live magic-scaling display.
+A Tampermonkey userscript for [Dragons of the Void](https://play.dragonsofthevoid.com/) that enhances item and magic tooltips: customizable colors and width, per-unit/conditional/distinct item tracking for damage-average math, item drop-location lookup, and (planned) live magic-scaling display.
 
 ## Install
 
@@ -17,12 +17,10 @@ To cut a release:
 
 ## Data tables (`data/`)
 
-The item-location and magic-scaling features fetch these JSON files live from this repo's raw GitHub URL at runtime (via `GM_xmlhttpRequest`, cached in `GM_setValue`) — editing them does **not** require a new script version or GreasyFork update.
+These JSON files are fetched live from this repo's raw GitHub URL at runtime (via `GM_xmlhttpRequest`, cached in `GM_setValue`) — editing them does **not** require a new script version or GreasyFork update.
 
-- `data/item-locations.json` — maps an item's exact in-game name to the raid(s)/zone(s) it drops in. Shown in the item tooltip on hover.
-- `data/magic-scaling.json` — maps a magic/spell's exact in-game name to whether it scales off the caster's or the hitter's Magic stat, so the tooltip can show accurate live numbers using stats scraped from the game's own fetch responses.
-
-Both files currently contain only a `_schema` placeholder entry and an example — the lookup features are not yet wired into the script.
+- `data/item-locations.json` — maps an item's exact in-game name to where it drops/is obtained. Populated and live: a 📍 button appears on item tooltips, opening a modal with the location details. Cached client-side for 24 hours.
+- `data/magic-scaling.json` — maps a magic/spell's exact in-game name to whether it scales off the caster's or the hitter's Magic stat, so the tooltip can eventually show accurate live numbers using stats scraped from the game's own fetch responses. Still only a `_schema` placeholder entry and an example — this feature is not yet wired into the script.
 
 ## Editing color/width settings
 
