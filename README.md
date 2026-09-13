@@ -27,3 +27,13 @@ Both files currently contain only a `_schema` placeholder entry and an example �
 ## Editing color/width settings
 
 End users configure colors and tooltip width in-game via the gear icon on item/magic tooltips; these are stored in that browser's `localStorage`, not in this repo.
+
+## Editing worn/owned settings (for damage-average math)
+
+When an item's tooltip contains a bonus that scales with how many copies you have (e.g. `+X damage per [Unit] worn`, `+X damage per [Item] owned`, `+X damage per distinct [Item] owned`, or `+X damage if [Item] is owned`), the script automatically injects extra controls into that tooltip so the shown damage average reflects your actual gear/formation, not just the base tooltip text. There is nothing to edit in this repo for this — it's all configured live, per-browser, in-game:
+
+- **Worn** (+/− stepper, top of the controls box): a single global count used for every `... per [Unit] worn` bonus, since worn slots are inherently shared across your equipped set. Defaults to 8.
+- **Per Item/Unit** (+/− stepper, one per detected item/unit name): how many of that specific item/unit you own, used for `... per [Item] owned`, `... per distinct [Item] owned`, and Formation-based bonuses. Defaults to 8 each.
+- **Conditional** (checkbox, one per detected item name): whether you own the item referenced by an `if [Item] is owned` bonus. Checked (owned) by default.
+
+Adjusting any of these immediately recalculates the tooltip's damage average. Values are saved per-browser in `localStorage` (`tooltipAmountWorn`, `tooltipPerItem`, `tooltipConditionalItems`) and persist across items that reference the same unit/item name.
