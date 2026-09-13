@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DOTV Item Description (Beauty)
 // @namespace    http://tampermonkey.net/
-// @version      5.3
+// @version      5.4
 // @license      MIT
 // @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; item drop-location lookup
 // @author       Zaregoto_Gaming
@@ -1033,20 +1033,41 @@
             const setBonusText = setBonusParts
                 .join('Set Bonus')
                 .trim();
-            // Use same splitting as regular procs: by newlines AND semicolons
-            const setBonusRawLines = setBonusText
-                .split(/[\r\n;]+/)
+            // Preserve real-newline boundaries so we know which semicolon-joined
+            // clauses belong to the same original tier line (e.g. "9+: ...; +4 HP
+            // healed vs Hard Raids, and +15% Crit Damage; +25% Crit Damage vs Hard
+            // Raids" is ONE tier's three stacked effects). Splitting everything
+            // into one flat list by newline-OR-semicolon (as before) loses that
+            // grouping, forcing each clause to be re-classified purely by keyword
+            // (does it say "damage...vs"? "per X owned"?) - which is exactly why a
+            // clause like "+4 HP healed vs Hard Raids, and +15% Crit Damage" (where
+            // "vs" comes BEFORE the trailing "Crit Damage") silently fell through
+            // to top-level formatting while its sibling "+25% Crit Damage vs Hard
+            // Raids" (damage-then-vs) happened to match. Tracking isContinuation
+            // instead means every non-first clause of a tier line nests under it,
+            // regardless of what keywords it happens to contain.
+            const setBonusSegments = [];
+            setBonusText
+                .split(/[\r\n]+/)
                 .map(l => l.trim())
-                .filter(Boolean);
+                .filter(Boolean)
+                .forEach((rawLine) => {
+                    rawLine.split(/;+/).map(c => c.trim()).filter(Boolean).forEach((clause, idx) => {
+                        setBonusSegments.push({ text: clause, isContinuation: idx > 0 });
+                    });
+                });
             setBonusHtml += `<br><div style="color:${userColors.setBonusHeader};font-weight:bold;">Set Bonus</div>`;
             let currentSetBonusProcRate = null; // Track proc rate for set bonus sub-effects
             let setBonusFirstGreenHeader = true; // Track if this is the first green header in set bonus
-            for (let i = 0; i < setBonusRawLines.length; i++) {
-                let originalLine = setBonusRawLines[i];
+            for (let i = 0; i < setBonusSegments.length; i++) {
+                let originalLine = setBonusSegments[i].text;
+                const isContinuation = setBonusSegments[i].isContinuation;
                 let line = originalLine.replace(/^[\s•·*-]+/, '').trim();
                 const damageData = extractDamageData(line, setName, true);
                 const isArmorType = /light armor:|heavy armor:/i.test(originalLine);
-                const isGreenHeader = originalLine.includes(':') || /chance to proc/i.test(originalLine);
+                // A continuation clause never restarts a new header, even if it
+                // happens to contain a colon - it always belongs to its tier line.
+                const isGreenHeader = !isContinuation && (originalLine.includes(':') || /chance to proc/i.test(originalLine));
                 const isTierLine = /^\d+\+?:/.test(line); // Lines like "5+:", "7+:", "8+:", "9+:"
                 const lineWithoutBullet = originalLine.replace(/^[\s•·*-]+/, '').trim();
                 const isIndentedDamage = lineWithoutBullet.startsWith('+') &&
@@ -1119,8 +1140,9 @@
                     // V4.9 FIX: Append average inline during HTML generation
                     const avgHtml = effectiveAvg !== null ? ' ' + createAvgSpan(effectiveAvg, 'blueAccent') : '';
                     setBonusHtml += `<div style="color:${userColors.greenHeader};font-weight:bold;margin-top:8px;">${line}${avgHtml}</div>`;
-                } else if (isIndentedDamage || isVsRaidDamage || isConditionalDamage || isPerUnitDamage) {
-                    // Sub-effect formatting - these patterns indicate sub-effects regardless of damage extraction
+                } else if (isIndentedDamage || isVsRaidDamage || isConditionalDamage || isPerUnitDamage || isContinuation) {
+                    // Sub-effect formatting - either a recognized damage pattern, or
+                    // (isContinuation) simply a stacked clause of the same tier line
                     // V4.9 FIX: Append average inline during HTML generation
                     const avgHtml = effectiveAvg !== null ? ' ' + createAvgSpan(effectiveAvg, 'blueAccent') : '';
                     setBonusHtml += `<div style="margin-left:3em;margin-top:2px;color:${userColors.tierSubEffect};">• ${line}${avgHtml}</div>`;

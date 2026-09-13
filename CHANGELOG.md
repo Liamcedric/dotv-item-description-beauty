@@ -1,5 +1,8 @@
 # Changelog
 
+## 5.4
+- Fixed: Set Bonus tiers with multiple stacked effects on one line (e.g. "9+: heal proc; +4 HP healed vs Hard Raids, and +15% Crit Damage; +25% Crit Damage vs Hard Raids") only nested some of those effects under the tier bullet - whichever ones happened to match a "damage...vs" keyword pattern - while identically-structured siblings rendered as flat top-level lines. Now every stacked clause on a tier's line nests under it, regardless of wording.
+
 ## 5.3
 - Fixed: the (Avg) tag on regular items' indented sub-effect lines ("Item Sub Proc") rendered in the same gold color as the line itself instead of red, making it blend in. Now uses the same red AVG color as the main proc line.
 
