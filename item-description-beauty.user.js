@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DOTV Item Description (Beauty)
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      5.2
 // @license      MIT
 // @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; item drop-location lookup
 // @author       Zaregoto_Gaming
@@ -16,9 +16,21 @@
 // @downloadURL  https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/item-description-beauty.user.js
 // @updateURL    https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/item-description-beauty.user.js
 // ==/UserScript==
+//
+// FILE MAP (in order below):
+//   1. GLOBALS & STATE           - all persisted/module-level state
+//   2. DAMAGE PATTERN REGISTRY   - the regex table that drives damage-average math
+//   3. CSS                       - static style injection
+//   4. FUNCTIONS                 - grouped by feature area (see sub-headers)
+//   5. BOOTSTRAP                 - the handful of calls that actually start the script
 (function () {
     'use strict';
-    // ============ CONFIG: EASILY EDITABLE ============
+
+    // ================================================================
+    // 1. GLOBALS & STATE
+    // ================================================================
+
+    // ---- Multiplier / conditional-item state ----
     // User-configurable multipliers for damage calculations
     let amountWorn = parseInt(localStorage.getItem("tooltipAmountWorn")) || 8;
     // Unified storage for all "per X" item/unit counts (covers distinct, per-unit owned, per-unit formation, etc)
@@ -26,7 +38,8 @@
     const perItemStorage = JSON.parse(localStorage.getItem("tooltipPerItem")) || {};
     // Storage for conditional items (e.g., "Frostblossom Seed": true/false)
     const conditionalItemsStorage = JSON.parse(localStorage.getItem("tooltipConditionalItems")) || {};
-    // ============ COLOR CONFIGURATION (User-customizable) ============
+
+    // ---- Color configuration (user-customizable) ----
     const defaultColors = {
         // Regular items
         itemNameHighlight: '#FFB752',      // Item name glow color
@@ -47,577 +60,28 @@
         const saved = localStorage.getItem('tooltipColors');
         return saved ? { ...defaultColors, ...JSON.parse(saved) } : defaultColors;
     })();
-    function saveUserColors() {
-        localStorage.setItem('tooltipColors', JSON.stringify(userColors));
-    }
-    function saveMultipliers() {
-        localStorage.setItem("tooltipAmountWorn", amountWorn);
-        localStorage.setItem("tooltipPerItem", JSON.stringify(perItemStorage));
-        localStorage.setItem("tooltipConditionalItems", JSON.stringify(conditionalItemsStorage));
-    }
-    // ============ ITEM LOCATION LOOKUP ============
+
+    // ---- Item location lookup config ----
     const ITEM_LOCATIONS_URL = 'https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/data/item-locations.json';
     const ITEM_LOCATIONS_CACHE_KEY = 'itemLocationsCacheV1';
     const ITEM_LOCATIONS_CACHE_TIME_KEY = 'itemLocationsCacheTimeV1';
     const ITEM_LOCATIONS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
     let itemLocationIndex = null;
-    function slugifyItemName(name) {
-        return name
-            .toLowerCase()
-            .replace(/'/g, '')
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-+|-+$/g, '');
-    }
-    function buildItemLocationIndex(json) {
-        // Keys look like "e.lumina-flash-armor" - the prefix is an internal
-        // category code, the item's display name always slugifies to the part after the dot.
-        const index = new Map();
-        for (const key of Object.keys(json)) {
-            const dotIndex = key.indexOf('.');
-            if (dotIndex === -1) continue;
-            index.set(key.substring(dotIndex + 1), json[key]);
-        }
-        return index;
-    }
-    function fetchItemLocationsJson() {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: ITEM_LOCATIONS_URL,
-                onload: (res) => {
-                    if (res.status >= 200 && res.status < 300) {
-                        try {
-                            resolve(JSON.parse(res.responseText));
-                        } catch (e) {
-                            reject(e);
-                        }
-                    } else {
-                        reject(new Error('HTTP ' + res.status));
-                    }
-                },
-                onerror: reject,
-                ontimeout: reject
-            });
-        });
-    }
-    async function initItemLocations() {
-        const cachedRaw = GM_getValue(ITEM_LOCATIONS_CACHE_KEY, null);
-        const cachedTime = GM_getValue(ITEM_LOCATIONS_CACHE_TIME_KEY, 0);
-        const isFresh = cachedRaw && (Date.now() - cachedTime < ITEM_LOCATIONS_CACHE_TTL);
-        if (isFresh) {
-            try {
-                itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
-                return;
-            } catch (e) {
-                // Cache is corrupt - fall through to a fresh fetch
-            }
-        }
-        try {
-            const json = await fetchItemLocationsJson();
-            GM_setValue(ITEM_LOCATIONS_CACHE_KEY, JSON.stringify(json));
-            GM_setValue(ITEM_LOCATIONS_CACHE_TIME_KEY, Date.now());
-            itemLocationIndex = buildItemLocationIndex(json);
-        } catch (e) {
-            console.warn('DOTV Item Description: failed to fetch item location data', e);
-            if (cachedRaw) {
-                try {
-                    itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
-                } catch (e2) {
-                    // No usable data available - location buttons simply won't appear
-                }
-            }
-        }
-    }
-    initItemLocations();
-    function findItemLocation(itemName) {
-        if (!itemLocationIndex || !itemName) return null;
-        const entry = itemLocationIndex.get(slugifyItemName(itemName));
-        if (!entry || !entry.locationText) return null;
-        return entry;
-    }
-    function getItemNameFromPopover(popover) {
-        const nameSpan = popover.querySelector('.item-popover-head-details .item-name');
-        if (nameSpan) return nameSpan.textContent.trim();
-        // Magic item cards have no separate name element - the name is the
-        // first line of the card text, before the colon.
-        const detailSpan = popover.querySelector('.item-popover-head-details span');
-        if (detailSpan) {
-            const text = detailSpan.innerText || detailSpan.textContent || '';
-            const firstLine = text.split(/[\r\n;]/)[0];
-            const colonIndex = firstLine.indexOf(':');
-            return (colonIndex !== -1 ? firstLine.substring(0, colonIndex) : firstLine).trim();
-        }
-        return null;
-    }
-    // Splits text on top-level ", " (not inside parentheses, and not part of a
-    // comma-grouped number like "1,000,000" which has no space after the comma).
-    function splitTopLevelSegments(text) {
-        const segments = [];
-        let depth = 0;
-        let start = 0;
-        for (let i = 0; i < text.length; i++) {
-            const ch = text[i];
-            if (ch === '(') depth++;
-            else if (ch === ')') depth = Math.max(0, depth - 1);
-            else if (ch === ',' && depth === 0 && text[i + 1] === ' ') {
-                segments.push(text.slice(start, i).trim());
-                start = i + 2;
-                i++;
-            }
-        }
-        segments.push(text.slice(start).trim());
-        return segments;
-    }
-    // Renders locationText into readable rows instead of one dense blob:
-    // "- " lines become bullets, ":" lines become section headers, and any
-    // line with 3+ comma-separated clauses (e.g. a multi-ingredient recipe)
-    // gets broken onto its own indented lines.
-    function renderLocationText(container, locationText) {
-        const rawLines = locationText.split('\n');
-        rawLines.forEach((rawLine) => {
-            if (rawLine.trim() === '') {
-                const spacer = document.createElement('div');
-                spacer.style.cssText = 'height:10px;';
-                container.appendChild(spacer);
-                return;
-            }
-            const bulletMatch = rawLine.match(/^\s*-\s+(.*)$/);
-            const isBullet = !!bulletMatch;
-            const content = isBullet ? bulletMatch[1] : rawLine.trim();
-            const isHeader = !isBullet && /:$/.test(content);
-            // Only break a line into multiple rows when it has 3+ top-level
-            // clauses (a real multi-ingredient list) - a normal "Item - Source,
-            // Difficulty" bullet has just one comma and should stay on one line.
-            const splitCandidates = isHeader ? [content] : splitTopLevelSegments(content);
-            const segments = splitCandidates.length >= 3 ? splitCandidates : [content];
-            segments.forEach((seg, idx) => {
-                const row = document.createElement('div');
-                const isContinuation = idx > 0;
-                let style = 'margin:2px 0;';
-                if (isHeader) {
-                    style += 'color:#FFB752;font-weight:bold;margin-top:10px;';
-                } else if (isBullet && !isContinuation) {
-                    style += 'padding-left:16px;text-indent:-16px;';
-                } else if (isContinuation) {
-                    style += isBullet ? 'padding-left:32px;' : 'padding-left:16px;';
-                    style += 'color:#c9a86a;';
-                }
-                if (isBullet && !isContinuation) {
-                    const mark = document.createElement('span');
-                    mark.textContent = '• ';
-                    mark.style.color = '#FFB752';
-                    row.appendChild(mark);
-                    row.appendChild(document.createTextNode(seg));
-                } else {
-                    row.textContent = seg;
-                }
-                row.style.cssText += style;
-                container.appendChild(row);
-            });
-        });
-    }
-    function openLocationModal(itemName, entry) {
-        if (document.getElementById('itemLocationModal')) return;
-        const backdrop = document.createElement('div');
-        backdrop.id = 'itemLocationModalBackdrop';
-        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;';
-        backdrop.addEventListener('click', (e) => {
-            if (e.target === backdrop) {
-                backdrop.remove();
-                modal.remove();
-            }
-        });
-        const modal = document.createElement('div');
-        modal.id = 'itemLocationModal';
-        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:560px;width:92vw;max-height:80vh;overflow:auto;';
-        const title = document.createElement('h2');
-        title.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:18px;text-align:center;text-shadow:0 0 8px rgba(255,255,255,0.5);';
-        title.textContent = itemName;
-        modal.appendChild(title);
-        const body = document.createElement('div');
-        body.style.cssText = 'color:#d4af37;font-size:13px;line-height:1.55;';
-        renderLocationText(body, entry.locationText);
-        modal.appendChild(body);
-        const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'display:block;margin:16px auto 0;padding:8px 20px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
-        closeBtn.textContent = 'Close';
-        closeBtn.addEventListener('click', () => {
-            backdrop.remove();
-            modal.remove();
-        });
-        modal.appendChild(closeBtn);
-        document.body.appendChild(backdrop);
-        document.body.appendChild(modal);
-    }
-    function injectLocationButton(itemPopover) {
-        if (!itemPopover || itemPopover.dataset.locationInjected) return;
-        const itemName = getItemNameFromPopover(itemPopover);
-        const entry = findItemLocation(itemName);
-        if (!entry) return;
-        itemPopover.dataset.locationInjected = 'true';
-        const itemHead = itemPopover.querySelector('.item-popover-head');
-        if (!itemHead || itemHead.querySelector('.tooltip-location-icon')) return;
-        const locationBtn = document.createElement('button');
-        locationBtn.className = 'tooltip-location-icon';
-        locationBtn.style.cssText = 'position:absolute;top:8px;right:36px;background:none;border:none;color:#a0725f;cursor:pointer;font-size:16px;padding:4px;transition:color 0.2s;z-index:100;';
-        locationBtn.textContent = '📍';
-        locationBtn.title = 'Item Location';
-        locationBtn.addEventListener('click', () => openLocationModal(itemName, entry));
-        locationBtn.addEventListener('mouseenter', () => locationBtn.style.color = '#FFB752');
-        locationBtn.addEventListener('mouseleave', () => locationBtn.style.color = '#a0725f');
-        itemPopover.style.position = 'relative';
-        itemPopover.appendChild(locationBtn);
-    }
-    function openImageZoom(imgElement) {
-        // Prevent opening if already open
-        if (document.getElementById('imageZoomModal')) return;
-        const imageSrc = imgElement.src;
-        // Create backdrop
-        const backdrop = document.createElement('div');
-        backdrop.id = 'imageZoomBackdrop';
-        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:9999;cursor:pointer;';
-        backdrop.addEventListener('click', (e) => {
-            if (e.target === backdrop) {
-                backdrop.remove();
-                modal.remove();
-            }
-        });
-        // Create modal
-        const modal = document.createElement('div');
-        modal.id = 'imageZoomModal';
-        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;align-items:center;box-shadow:0 0 20px rgba(0,0,0,0.8);';
-        // Close button at top-right (half off corner)
-        const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'position:absolute;top:-10px;right:-10px;background:none;border:none;cursor:pointer;padding:0;width:36px;height:36px;display:flex;align-items:center;justify-content:center;z-index:10001;';
-        closeBtn.title = 'Close';
-        // Use game's exit button image
-        const closeImg = document.createElement('img');
-        closeImg.src = 'https://files.dragonsofthevoid.com/ui/buttons/exit-button.jpg';
-        closeImg.className = 'button';
-        closeImg.style.cssText = 'height:20px;width:20px;';
-        closeBtn.appendChild(closeImg);
-        closeBtn.addEventListener('click', () => {
-            backdrop.remove();
-            modal.remove();
-        });
-        closeBtn.addEventListener('mouseenter', () => closeImg.style.opacity = '0.7');
-        closeBtn.addEventListener('mouseleave', () => closeImg.style.opacity = '1');
-        // Display image
-        const imgContainer = document.createElement('div');
-        imgContainer.style.cssText = 'display:flex;align-items:center;justify-content:center;max-width:100%;max-height:calc(90vh - 60px);overflow:auto;';
-        const img = document.createElement('img');
-        img.src = imageSrc;
-        img.style.cssText = 'max-width:100%;max-height:100%;image-rendering:pixelated;border:1px solid #6b5344;border-radius:4px;';
-        imgContainer.appendChild(img);
-        modal.appendChild(closeBtn);
-        modal.appendChild(imgContainer);
-        document.body.appendChild(backdrop);
-        document.body.appendChild(modal);
-    }
-    function injectImageZoom() {
-        // Find all item images and add click handlers
-        document.querySelectorAll('.item-popover-image-container img').forEach(img => {
-            if (!img.dataset.zoomInjected) {
-                img.dataset.zoomInjected = 'true';
-                img.style.cursor = 'pointer';
-                img.style.transition = 'opacity 0.2s';
-                img.addEventListener('click', () => openImageZoom(img));
-                img.addEventListener('mouseenter', () => img.style.opacity = '0.8');
-                img.addEventListener('mouseleave', () => img.style.opacity = '1');
-            }
-        });
-    }
-    function openColorSettings(sourcePopover = null, isMagicItem = false, magicCardSpan = null) {
-        // Check if settings modal already exists
-        let modal = document.getElementById('tooltipColorSettings');
-        if (modal) {
-            modal.style.display = modal.style.display === 'none' ? 'block' : 'none';
-            return;
-        }
-        // Prepare preview reference (available for all color pickers)
-        let previewEffectsDiv = null;
-        // Create modal backdrop
-        const backdrop = document.createElement('div');
-        backdrop.id = 'tooltipColorSettingsBackdrop';
-        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;';
-        backdrop.addEventListener('click', (e) => {
-            if (e.target === backdrop) {
-                backdrop.remove();
-                modal.remove();
-            }
-        });
-        // Create modal
-        modal = document.createElement('div');
-        modal.id = 'tooltipColorSettings';
-        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:90vw;max-height:90vh;overflow:auto;display:flex;gap:20px;';
-        // LEFT PANEL: Color pickers
-        const leftPanel = document.createElement('div');
-        leftPanel.style.cssText = 'flex:0 0 350px;';
-        const title = document.createElement('h2');
-        title.style.cssText = 'color:#FFB752;text-align:center;margin:0 0 20px 0;font-size:18px;';
-        title.textContent = isMagicItem ? 'Magic Item Color Settings' : 'Tooltip Color Settings';
-        leftPanel.appendChild(title);
-        // Add width adjustment controls (only for regular items, not magic)
-        if (!isMagicItem) {
-            const widthContainer = document.createElement('div');
-            widthContainer.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:20px;padding:10px;background:rgba(107,83,68,0.3);border-radius:4px;';
-            const widthLabel = document.createElement('span');
-            widthLabel.style.cssText = 'color:#a0725f;font-size:12px;min-width:60px;';
-            widthLabel.textContent = 'Width:';
-            const widthDisplay = document.createElement('span');
-            widthDisplay.style.cssText = 'color:#FFB752;font-size:14px;font-weight:bold;min-width:50px;text-align:center;';
-            widthDisplay.textContent = `${tooltipWidth}px`;
-            const minusBtn = document.createElement('button');
-            minusBtn.textContent = '−';
-            minusBtn.style.cssText = 'width:24px;height:24px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;cursor:pointer;border-radius:3px;';
-            minusBtn.addEventListener('click', () => {
-                tooltipWidth = Math.max(200, tooltipWidth - 20);
-                applyTooltipWidth(tooltipWidth);
-                widthDisplay.textContent = `${tooltipWidth}px`;
-                // Update preview width via wrapper
-                if (previewEffectsDiv && previewEffectsDiv._wrapper) {
-                    previewEffectsDiv._wrapper.style.width = `${tooltipWidth}px`;
-                }
-            });
-            const plusBtn = document.createElement('button');
-            plusBtn.textContent = '+';
-            plusBtn.style.cssText = 'width:24px;height:24px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;cursor:pointer;border-radius:3px;';
-            plusBtn.addEventListener('click', () => {
-                tooltipWidth += 20;
-                applyTooltipWidth(tooltipWidth);
-                widthDisplay.textContent = `${tooltipWidth}px`;
-                // Update preview width via wrapper
-                if (previewEffectsDiv && previewEffectsDiv._wrapper) {
-                    previewEffectsDiv._wrapper.style.width = `${tooltipWidth}px`;
-                }
-            });
-            widthContainer.appendChild(widthLabel);
-            widthContainer.appendChild(minusBtn);
-            widthContainer.appendChild(widthDisplay);
-            widthContainer.appendChild(plusBtn);
-            leftPanel.appendChild(widthContainer);
-        }
-        // Color settings - different for magic vs regular items
-        const colorSettings = isMagicItem ? [
-            { key: 'magicProcName', label: 'Proc Name (Highlighted)' },
-            { key: 'magicItemProc', label: 'Item Proc' },
-            { key: 'magicItemSubProc', label: 'Item Sub Proc' },
-            { key: 'magicHealingDamage', label: 'Healing & DMG Resist' }
-        ] : [
-            { key: 'itemNameHighlight', label: 'Proc Name (Highlighted)' },
-            { key: 'greenHeader', label: 'Item Proc' },
-            { key: 'tierMainEffect', label: 'Item Sub Proc' },
-            { key: 'setBonusHeader', label: 'Set Bonus Header' },
-            { key: 'tierSubEffect', label: 'Set Bonus Sub Proc' },
-            { key: 'blueAccent', label: 'Set Bonus AVG' },
-            { key: 'redAccent', label: 'AVG Proc' }
-        ];
-        const colorInputs = {};
-        for (const setting of colorSettings) {
-            const container = document.createElement('div');
-            container.style.cssText = 'margin-bottom:16px;';
-            const label = document.createElement('label');
-            label.style.cssText = 'display:block;color:#a0725f;font-size:12px;margin-bottom:6px;';
-            label.textContent = setting.label;
-            const colorPicker = document.createElement('input');
-            colorPicker.type = 'color';
-            colorPicker.value = userColors[setting.key];
-            colorPicker.style.cssText = 'width:100%;height:36px;border:1px solid #6b5344;border-radius:4px;cursor:pointer;';
-            colorInputs[setting.key] = colorPicker;
-            colorPicker.addEventListener('input', (e) => {
-                const oldColor = userColors[setting.key];
-                const newColor = e.target.value;
-                userColors[setting.key] = newColor;
-                // Live update preview with simple color swap
-                if (previewEffectsDiv) {
-                    updatePreviewColors(previewEffectsDiv, setting.key, oldColor, newColor);
-                }
-            });
-            container.appendChild(label);
-            container.appendChild(colorPicker);
-            leftPanel.appendChild(container);
-        }
-        // Button container
-        const buttonContainer = document.createElement('div');
-        buttonContainer.style.cssText = 'display:flex;gap:8px;margin-top:20px;';
-        // Apply button
-        const applyBtn = document.createElement('button');
-        applyBtn.style.cssText = 'flex:1;padding:10px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
-        applyBtn.textContent = 'Apply';
-        applyBtn.addEventListener('click', () => {
-            saveUserColors();
-            // Re-enhance all open item tooltips
-            document.querySelectorAll('.effects[data-enhanced="true"]').forEach(div => {
-                div.dataset.enhanced = '';
-                enhanceEffectsDiv(div);
-            });
-            // Re-enhance all magic cards
-            document.querySelectorAll('.item-popover-head-details span').forEach(span => {
-                if (span.dataset.enhanced) {
-                    span.dataset.enhanced = '';
-                    enhanceMagicCardDiv(span);
-                }
-            });
-            // Close modal
-            backdrop.remove();
-            modal.remove();
-        });
-        buttonContainer.appendChild(applyBtn);
-        // Reset button
-        const resetBtn = document.createElement('button');
-        resetBtn.style.cssText = 'flex:1;padding:10px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;border-radius:4px;cursor:pointer;';
-        resetBtn.textContent = 'Reset';
-        resetBtn.addEventListener('click', () => {
-            Object.assign(userColors, defaultColors);
-            for (const [key, input] of Object.entries(colorInputs)) {
-                input.value = userColors[key];
-            }
-            // Regenerate preview with fresh clone
-            if (previewEffectsDiv && sourcePopover) {
-                const sourceDiv = sourcePopover.querySelector('.effects') || sourcePopover.querySelector('.item-popover-head-details span');
-                if (sourceDiv) {
-                    const newPreview = sourceDiv.cloneNode(true);
-                    if (newPreview.classList.contains('effects')) {
-                        // Create wrapper for regular items
-                        const newWrapper = document.createElement('div');
-                        newWrapper.style.cssText = `width:${tooltipWidth}px;box-sizing:border-box;`;
-                        // Get computed font styles from source to match preview exactly
-                        const sourceStyles = window.getComputedStyle(sourceDiv);
-                        const fontCSS = `font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
-                        newPreview.style.cssText = fontCSS;
-                        newWrapper.appendChild(newPreview);
-                        previewEffectsDiv._wrapper.parentNode.replaceChild(newWrapper, previewEffectsDiv._wrapper);
-                        previewEffectsDiv = newPreview;
-                        previewEffectsDiv._wrapper = newWrapper;
-                    } else {
-                        // Magic items don't use wrapper
-                        const sourceStyles = window.getComputedStyle(sourceDiv);
-                        const fontCSS = `display:block;font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
-                        newPreview.style.cssText = fontCSS;
-                        previewEffectsDiv.parentNode.replaceChild(newPreview, previewEffectsDiv);
-                        previewEffectsDiv = newPreview;
-                    }
-                }
-            }
-        });
-        buttonContainer.appendChild(resetBtn);
-        // Close button
-        const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'flex:1;padding:10px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;border-radius:4px;cursor:pointer;';
-        closeBtn.textContent = 'Close';
-        closeBtn.addEventListener('click', () => {
-            backdrop.remove();
-            modal.remove();
-        });
-        buttonContainer.appendChild(closeBtn);
-        leftPanel.appendChild(buttonContainer);
-        modal.appendChild(leftPanel);
-        // RIGHT PANEL: Live preview of the actual item
-        if (sourcePopover) {
-            const rightPanel = document.createElement('div');
-            rightPanel.style.cssText = 'flex:1;min-width:300px;border:1px solid #6b5344;border-radius:4px;padding:12px;background:rgba(26,20,16,0.5);overflow-y:auto;max-height:calc(90vh - 80px);';
-            const previewTitle = document.createElement('h3');
-            previewTitle.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:14px;text-align:center;';
-            previewTitle.textContent = 'Live Preview';
-            rightPanel.appendChild(previewTitle);
-            // Clone the correct div based on item type
-            let sourceDiv;
-            if (isMagicItem && magicCardSpan) {
-                sourceDiv = magicCardSpan;
-            } else if (isMagicItem) {
-                sourceDiv = sourcePopover.querySelector('.item-popover-head-details span');
-            } else {
-                sourceDiv = sourcePopover.querySelector('.effects');
-            }
-            if (sourceDiv) {
-                previewEffectsDiv = sourceDiv.cloneNode(true);
-                if (isMagicItem) {
-                    // Get computed font styles from source to match preview exactly
-                    const sourceStyles = window.getComputedStyle(sourceDiv);
-                    const fontCSS = `display:block;font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
-                    previewEffectsDiv.style.cssText = fontCSS;
-                    rightPanel.appendChild(previewEffectsDiv);
-                } else {
-                    // Create a wrapper that mimics .item-popover-content to accurately show width
-                    const contentWrapper = document.createElement('div');
-                    contentWrapper.style.cssText = `width:${tooltipWidth}px;box-sizing:border-box;`;
-                    // Get computed font styles from source to match preview exactly
-                    const sourceStyles = window.getComputedStyle(sourceDiv);
-                    const fontCSS = `font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
-                    previewEffectsDiv.style.cssText = fontCSS;
-                    contentWrapper.appendChild(previewEffectsDiv);
-                    rightPanel.appendChild(contentWrapper);
-                    // Store reference to wrapper so we can update width later
-                    previewEffectsDiv._wrapper = contentWrapper;
-                }
-            }
-            modal.appendChild(rightPanel);
-        }
-        document.body.appendChild(backdrop);
-        document.body.appendChild(modal);
-    }
-    function updatePreviewColors(previewDiv, colorKey, oldColor, newColor) {
-        if (!previewDiv) return;
-        // Simple hex color swap in the innerHTML
-        previewDiv.innerHTML = previewDiv.innerHTML.replaceAll(oldColor, newColor);
-    }
-    function setDistinctItemCount(itemType, count) {
-        // Legacy: now just calls unified setter
-        setPerItemCount(itemType, count);
-    }
-    function hasConditionalItem(itemName) {
-        // Default to true (owned) if not explicitly set to false
-        const value = conditionalItemsStorage[itemName];
-        return value !== false; // Returns true if undefined or true
-    }
-    function setConditionalItem(itemName, owned) {
-        conditionalItemsStorage[itemName] = owned;
-        saveMultipliers();
-    }
-    function getPerItemCount(itemName) {
-        // Unified getter for ALL "per X" patterns (distinct, per-unit, per-formation, etc)
-        return perItemStorage[itemName] || 8;
-    }
-    function setPerItemCount(itemName, count) {
-        // Unified setter for ALL "per X" patterns
-        perItemStorage[itemName] = count;
-        saveMultipliers();
-    }
-    // Legacy functions for backward compatibility
-    function getPerUnitCount(unitName) {
-        return getPerItemCount(unitName);
-    }
-    function setPerUnit(unitName, count) {
-        setPerItemCount(unitName, count);
-    }
-    function extractPerUnitName(line) {
-        // Extract unit name from various per-unit patterns:
-        // - "per [X] owned"
-        // - "per [X] in the active Formation"
-        // - "per [X] in the Formation"
-        // - "per [X] and Formation owned"
-        // - "per [X] or [Y] in the Formation"
-        // Try "or" pattern first: "per [X] or [Y] in the Formation"
-        let match = line.match(/per\s+(.+?)\s+or\s+.+?\s+in\s+the\s+(?:active\s+)?Formation/i);
-        if (match) {
-            return match[1].trim();
-        }
-        // Try other patterns: "per [X] (owned|in active Formation|in Formation|and Formation owned)"
-        match = line.match(/per\s+(.+?)\s+(?:owned|in\s+the\s+(?:active\s+)?Formation|and\s+Formation\s+owned)/i);
-        if (match) {
-            // If multiple units comma-separated, just take the first one
-            const units = match[1].split(',').map(u => u.trim());
-            return units[0];
-        }
-        return null;
-    }
-    // ============ DAMAGE TYPES ============
+
+    // ---- Tooltip width state ----
+    let tooltipWidth = parseInt(localStorage.getItem("tooltipWidth")) || 500;
+    const tooltipWidthStyle = document.createElement("style");
+    tooltipWidthStyle.id = "dotv-tooltip-width-style";
+    document.head.appendChild(tooltipWidthStyle);
+
+    // ================================================================
+    // 2. DAMAGE PATTERN REGISTRY
+    // ================================================================
+    // Add new patterns here without touching core logic
     const DAMAGE_TYPES = [
         "Any", "Acid", "Dark", "Fire", "Holy", "Ice", "Lightning", "Nature",
         "Physical", "Poison", "Psychic", "Magic"
     ];
-    // ============ PATTERN REGISTRY (Modular & Extensible) ============
-    // Add new patterns here without touching core logic
     const DAMAGE_PATTERNS = [
         // ---- PROC PATTERNS (with % chance) ----
         {
@@ -883,7 +347,128 @@
             })
         }
     ];
-    // ============ HELPER FUNCTIONS ============
+
+    // ================================================================
+    // 3. CSS
+    // ================================================================
+    GM_addStyle(`
+        .item-popover {
+            max-width: 90vw !important;
+            height: auto !important;
+            max-height: 85vh !important;
+            overflow-y: auto !important;
+        }
+        .item-popover-content {
+            max-width: 90vw !important;
+            height: auto !important;
+            max-height: 85vh !important;
+            overflow-y: auto !important;
+        }
+        .formation-swap-menu {
+           width: 260px !important;
+        }
+        .stats-container > .dotv-select-lg > .custom-select-sub-container > .options-container {
+           right: auto !important;
+        }
+        .item-popover-content:has(> .health-summary) {
+           width: auto !important;
+        }
+        .item-popover:has(> .item-popover-content > .health-summary) {
+           width: auto !important;
+        }
+        .item-popover-content:has(> .auto-fill-btn) {
+           width: auto !important;
+        }
+        .item-popover:has(> .item-popover-content > .auto-fill-btn) {
+           width: auto !important;
+        }
+        .army-tile-container {
+          flex-wrap: nowrap !important;
+        }
+    `);
+
+    // ================================================================
+    // 4. FUNCTIONS
+    // ================================================================
+
+    // ---- Persistence helpers ----
+    function saveUserColors() {
+        localStorage.setItem('tooltipColors', JSON.stringify(userColors));
+    }
+    function saveMultipliers() {
+        localStorage.setItem("tooltipAmountWorn", amountWorn);
+        localStorage.setItem("tooltipPerItem", JSON.stringify(perItemStorage));
+        localStorage.setItem("tooltipConditionalItems", JSON.stringify(conditionalItemsStorage));
+    }
+    function hasConditionalItem(itemName) {
+        // Default to true (owned) if not explicitly set to false
+        const value = conditionalItemsStorage[itemName];
+        return value !== false; // Returns true if undefined or true
+    }
+    function setConditionalItem(itemName, owned) {
+        conditionalItemsStorage[itemName] = owned;
+        saveMultipliers();
+    }
+    function getPerItemCount(itemName) {
+        // Unified getter for ALL "per X" patterns (distinct, per-unit, per-formation, etc)
+        return perItemStorage[itemName] || 8;
+    }
+    function setPerItemCount(itemName, count) {
+        // Unified setter for ALL "per X" patterns
+        perItemStorage[itemName] = count;
+        saveMultipliers();
+    }
+    // Legacy functions for backward compatibility
+    function getPerUnitCount(unitName) {
+        return getPerItemCount(unitName);
+    }
+    function setPerUnit(unitName, count) {
+        setPerItemCount(unitName, count);
+    }
+    function setDistinctItemCount(itemType, count) {
+        // Legacy: now just calls unified setter
+        setPerItemCount(itemType, count);
+    }
+    function extractPerUnitName(line) {
+        // Extract unit name from various per-unit patterns:
+        // - "per [X] owned"
+        // - "per [X] in the active Formation"
+        // - "per [X] in the Formation"
+        // - "per [X] and Formation owned"
+        // - "per [X] or [Y] in the Formation"
+        // Try "or" pattern first: "per [X] or [Y] in the Formation"
+        let match = line.match(/per\s+(.+?)\s+or\s+.+?\s+in\s+the\s+(?:active\s+)?Formation/i);
+        if (match) {
+            return match[1].trim();
+        }
+        // Try other patterns: "per [X] (owned|in active Formation|in Formation|and Formation owned)"
+        match = line.match(/per\s+(.+?)\s+(?:owned|in\s+the\s+(?:active\s+)?Formation|and\s+Formation\s+owned)/i);
+        if (match) {
+            // If multiple units comma-separated, just take the first one
+            const units = match[1].split(',').map(u => u.trim());
+            return units[0];
+        }
+        return null;
+    }
+
+    // ---- Tooltip width control ----
+    function applyTooltipWidth(width) {
+        const contentWidth = width;
+        const outerWidth = width + 20;
+        tooltipWidthStyle.textContent = `
+            .item-popover-content {
+                width: ${contentWidth}px !important;
+            }
+            .item-popover {
+                width: ${outerWidth}px !important;
+            }
+        `;
+        localStorage.setItem("tooltipWidth", width);
+        // DON'T call repositionTooltip() - Vue handles its own positioning
+        // Repositioning after width change causes Vue to recalculate nested popover positions
+    }
+
+    // ---- Damage calculation helpers ----
     function formatNumber(num) {
         return num.toLocaleString();
     }
@@ -932,63 +517,277 @@
         }
         return null;
     }
-    // ============ TOOLTIP STYLING ============
-    let tooltipWidth = parseInt(localStorage.getItem("tooltipWidth")) || 500;
-    const tooltipWidthStyle = document.createElement("style");
-    tooltipWidthStyle.id = "dotv-tooltip-width-style";
-    document.head.appendChild(tooltipWidthStyle);
-    function applyTooltipWidth(width) {
-        const contentWidth = width;
-        const outerWidth = width + 20;
-        tooltipWidthStyle.textContent = `
-            .item-popover-content {
-                width: ${contentWidth}px !important;
-            }
-            .item-popover {
-                width: ${outerWidth}px !important;
-            }
-        `;
-        localStorage.setItem("tooltipWidth", width);
-        // DON'T call repositionTooltip() - Vue handles its own positioning
-        // Repositioning after width change causes Vue to recalculate nested popover positions
+
+    // ---- Item location lookup & modal ----
+    function slugifyItemName(name) {
+        return name
+            .toLowerCase()
+            .replace(/'/g, '')
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
     }
-    GM_addStyle(`
-        .item-popover {
-            max-width: 90vw !important;
-            height: auto !important;
-            max-height: 85vh !important;
-            overflow-y: auto !important;
+    function buildItemLocationIndex(json) {
+        // Keys look like "e.lumina-flash-armor" - the prefix is an internal
+        // category code, the item's display name always slugifies to the part after the dot.
+        const index = new Map();
+        for (const key of Object.keys(json)) {
+            const dotIndex = key.indexOf('.');
+            if (dotIndex === -1) continue;
+            index.set(key.substring(dotIndex + 1), json[key]);
         }
-        .item-popover-content {
-            max-width: 90vw !important;
-            height: auto !important;
-            max-height: 85vh !important;
-            overflow-y: auto !important;
+        return index;
+    }
+    function fetchItemLocationsJson() {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: ITEM_LOCATIONS_URL,
+                onload: (res) => {
+                    if (res.status >= 200 && res.status < 300) {
+                        try {
+                            resolve(JSON.parse(res.responseText));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    } else {
+                        reject(new Error('HTTP ' + res.status));
+                    }
+                },
+                onerror: reject,
+                ontimeout: reject
+            });
+        });
+    }
+    async function initItemLocations() {
+        const cachedRaw = GM_getValue(ITEM_LOCATIONS_CACHE_KEY, null);
+        const cachedTime = GM_getValue(ITEM_LOCATIONS_CACHE_TIME_KEY, 0);
+        const isFresh = cachedRaw && (Date.now() - cachedTime < ITEM_LOCATIONS_CACHE_TTL);
+        if (isFresh) {
+            try {
+                itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
+                return;
+            } catch (e) {
+                // Cache is corrupt - fall through to a fresh fetch
+            }
         }
-        .formation-swap-menu {
-           width: 260px !important;
+        try {
+            const json = await fetchItemLocationsJson();
+            GM_setValue(ITEM_LOCATIONS_CACHE_KEY, JSON.stringify(json));
+            GM_setValue(ITEM_LOCATIONS_CACHE_TIME_KEY, Date.now());
+            itemLocationIndex = buildItemLocationIndex(json);
+        } catch (e) {
+            console.warn('DOTV Item Description: failed to fetch item location data', e);
+            if (cachedRaw) {
+                try {
+                    itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
+                } catch (e2) {
+                    // No usable data available - location buttons simply won't appear
+                }
+            }
         }
-        .stats-container > .dotv-select-lg > .custom-select-sub-container > .options-container {
-           right: auto !important;
+    }
+    function findItemLocation(itemName) {
+        if (!itemLocationIndex || !itemName) return null;
+        const entry = itemLocationIndex.get(slugifyItemName(itemName));
+        if (!entry || !entry.locationText) return null;
+        return entry;
+    }
+    function getItemNameFromPopover(popover) {
+        const nameSpan = popover.querySelector('.item-popover-head-details .item-name');
+        if (nameSpan) return nameSpan.textContent.trim();
+        // Magic item cards have no separate name element - the name is the
+        // first line of the card text, before the colon.
+        const detailSpan = popover.querySelector('.item-popover-head-details span');
+        if (detailSpan) {
+            const text = detailSpan.innerText || detailSpan.textContent || '';
+            const firstLine = text.split(/[\r\n;]/)[0];
+            const colonIndex = firstLine.indexOf(':');
+            return (colonIndex !== -1 ? firstLine.substring(0, colonIndex) : firstLine).trim();
         }
-        .item-popover-content:has(> .health-summary) {
-           width: auto !important;
+        return null;
+    }
+    // Splits text on top-level ", " (not inside parentheses, and not part of a
+    // comma-grouped number like "1,000,000" which has no space after the comma).
+    function splitTopLevelSegments(text) {
+        const segments = [];
+        let depth = 0;
+        let start = 0;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '(') depth++;
+            else if (ch === ')') depth = Math.max(0, depth - 1);
+            else if (ch === ',' && depth === 0 && text[i + 1] === ' ') {
+                segments.push(text.slice(start, i).trim());
+                start = i + 2;
+                i++;
+            }
         }
-        .item-popover:has(> .item-popover-content > .health-summary) {
-           width: auto !important;
-        }
-        .item-popover-content:has(> .auto-fill-btn) {
-           width: auto !important;
-        }
-        .item-popover:has(> .item-popover-content > .auto-fill-btn) {
-           width: auto !important;
-        }
-        .army-tile-container {
-          flex-wrap: nowrap !important;
-        }
-    `);
-    applyTooltipWidth(tooltipWidth);
-    // ============ MAGIC CARD FORMATTING ============
+        segments.push(text.slice(start).trim());
+        return segments;
+    }
+    // Renders locationText into readable rows instead of one dense blob:
+    // "- " lines become bullets, ":" lines become section headers, and any
+    // line with 3+ comma-separated clauses (e.g. a multi-ingredient recipe)
+    // gets broken onto its own indented lines.
+    function renderLocationText(container, locationText) {
+        const rawLines = locationText.split('\n');
+        rawLines.forEach((rawLine) => {
+            if (rawLine.trim() === '') {
+                const spacer = document.createElement('div');
+                spacer.style.cssText = 'height:10px;';
+                container.appendChild(spacer);
+                return;
+            }
+            const bulletMatch = rawLine.match(/^\s*-\s+(.*)$/);
+            const isBullet = !!bulletMatch;
+            const content = isBullet ? bulletMatch[1] : rawLine.trim();
+            const isHeader = !isBullet && /:$/.test(content);
+            // Only break a line into multiple rows when it has 3+ top-level
+            // clauses (a real multi-ingredient list) - a normal "Item - Source,
+            // Difficulty" bullet has just one comma and should stay on one line.
+            const splitCandidates = isHeader ? [content] : splitTopLevelSegments(content);
+            const segments = splitCandidates.length >= 3 ? splitCandidates : [content];
+            segments.forEach((seg, idx) => {
+                const row = document.createElement('div');
+                const isContinuation = idx > 0;
+                let style = 'margin:2px 0;';
+                if (isHeader) {
+                    style += 'color:#FFB752;font-weight:bold;margin-top:10px;';
+                } else if (isBullet && !isContinuation) {
+                    style += 'padding-left:16px;text-indent:-16px;';
+                } else if (isContinuation) {
+                    style += isBullet ? 'padding-left:32px;' : 'padding-left:16px;';
+                    style += 'color:#c9a86a;';
+                }
+                if (isBullet && !isContinuation) {
+                    const mark = document.createElement('span');
+                    mark.textContent = '• ';
+                    mark.style.color = '#FFB752';
+                    row.appendChild(mark);
+                    row.appendChild(document.createTextNode(seg));
+                } else {
+                    row.textContent = seg;
+                }
+                row.style.cssText += style;
+                container.appendChild(row);
+            });
+        });
+    }
+    function openLocationModal(itemName, entry) {
+        if (document.getElementById('itemLocationModal')) return;
+        const backdrop = document.createElement('div');
+        backdrop.id = 'itemLocationModalBackdrop';
+        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;';
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) {
+                backdrop.remove();
+                modal.remove();
+            }
+        });
+        const modal = document.createElement('div');
+        modal.id = 'itemLocationModal';
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:560px;width:92vw;max-height:80vh;overflow:auto;';
+        const title = document.createElement('h2');
+        title.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:18px;text-align:center;text-shadow:0 0 8px rgba(255,255,255,0.5);';
+        title.textContent = itemName;
+        modal.appendChild(title);
+        const body = document.createElement('div');
+        body.style.cssText = 'color:#d4af37;font-size:13px;line-height:1.55;';
+        renderLocationText(body, entry.locationText);
+        modal.appendChild(body);
+        const closeBtn = document.createElement('button');
+        closeBtn.style.cssText = 'display:block;margin:16px auto 0;padding:8px 20px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
+        closeBtn.textContent = 'Close';
+        closeBtn.addEventListener('click', () => {
+            backdrop.remove();
+            modal.remove();
+        });
+        modal.appendChild(closeBtn);
+        document.body.appendChild(backdrop);
+        document.body.appendChild(modal);
+    }
+    function injectLocationButton(itemPopover) {
+        if (!itemPopover || itemPopover.dataset.locationInjected) return;
+        const itemName = getItemNameFromPopover(itemPopover);
+        const entry = findItemLocation(itemName);
+        if (!entry) return;
+        itemPopover.dataset.locationInjected = 'true';
+        const itemHead = itemPopover.querySelector('.item-popover-head');
+        if (!itemHead || itemHead.querySelector('.tooltip-location-icon')) return;
+        const locationBtn = document.createElement('button');
+        locationBtn.className = 'tooltip-location-icon';
+        locationBtn.style.cssText = 'position:absolute;top:8px;right:36px;background:none;border:none;color:#a0725f;cursor:pointer;font-size:16px;padding:4px;transition:color 0.2s;z-index:100;';
+        locationBtn.textContent = '📍';
+        locationBtn.title = 'Item Location';
+        locationBtn.addEventListener('click', () => openLocationModal(itemName, entry));
+        locationBtn.addEventListener('mouseenter', () => locationBtn.style.color = '#FFB752');
+        locationBtn.addEventListener('mouseleave', () => locationBtn.style.color = '#a0725f');
+        itemPopover.style.position = 'relative';
+        itemPopover.appendChild(locationBtn);
+    }
+
+    // ---- Image zoom ----
+    function openImageZoom(imgElement) {
+        // Prevent opening if already open
+        if (document.getElementById('imageZoomModal')) return;
+        const imageSrc = imgElement.src;
+        // Create backdrop
+        const backdrop = document.createElement('div');
+        backdrop.id = 'imageZoomBackdrop';
+        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:9999;cursor:pointer;';
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) {
+                backdrop.remove();
+                modal.remove();
+            }
+        });
+        // Create modal
+        const modal = document.createElement('div');
+        modal.id = 'imageZoomModal';
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;align-items:center;box-shadow:0 0 20px rgba(0,0,0,0.8);';
+        // Close button at top-right (half off corner)
+        const closeBtn = document.createElement('button');
+        closeBtn.style.cssText = 'position:absolute;top:-10px;right:-10px;background:none;border:none;cursor:pointer;padding:0;width:36px;height:36px;display:flex;align-items:center;justify-content:center;z-index:10001;';
+        closeBtn.title = 'Close';
+        // Use game's exit button image
+        const closeImg = document.createElement('img');
+        closeImg.src = 'https://files.dragonsofthevoid.com/ui/buttons/exit-button.jpg';
+        closeImg.className = 'button';
+        closeImg.style.cssText = 'height:20px;width:20px;';
+        closeBtn.appendChild(closeImg);
+        closeBtn.addEventListener('click', () => {
+            backdrop.remove();
+            modal.remove();
+        });
+        closeBtn.addEventListener('mouseenter', () => closeImg.style.opacity = '0.7');
+        closeBtn.addEventListener('mouseleave', () => closeImg.style.opacity = '1');
+        // Display image
+        const imgContainer = document.createElement('div');
+        imgContainer.style.cssText = 'display:flex;align-items:center;justify-content:center;max-width:100%;max-height:calc(90vh - 60px);overflow:auto;';
+        const img = document.createElement('img');
+        img.src = imageSrc;
+        img.style.cssText = 'max-width:100%;max-height:100%;image-rendering:pixelated;border:1px solid #6b5344;border-radius:4px;';
+        imgContainer.appendChild(img);
+        modal.appendChild(closeBtn);
+        modal.appendChild(imgContainer);
+        document.body.appendChild(backdrop);
+        document.body.appendChild(modal);
+    }
+    function injectImageZoom() {
+        // Find all item images and add click handlers
+        document.querySelectorAll('.item-popover-image-container img').forEach(img => {
+            if (!img.dataset.zoomInjected) {
+                img.dataset.zoomInjected = 'true';
+                img.style.cursor = 'pointer';
+                img.style.transition = 'opacity 0.2s';
+                img.addEventListener('click', () => openImageZoom(img));
+                img.addEventListener('mouseenter', () => img.style.opacity = '0.8');
+                img.addEventListener('mouseleave', () => img.style.opacity = '1');
+            }
+        });
+    }
+
+    // ---- Magic card formatting ----
     function colorHealWords(text, healColor = '#dc143c') {
         // Color entire healing phrases in specified color (default crimson)
         const healPhrases = [
@@ -1062,37 +861,8 @@
         }
         return { html: htmlLines.join('') };
     }
-    function enhanceMagicCardDiv(div) {
-        if (div.dataset.enhanced) return;
-        let text = div.innerText.trim();
-        if (!text) return;
-        // Strip old averages (if any exist)
-        text = text.replace(/\s*\([\d,]+\s+Avg\)/g, '');
-        const { html } = formatMagicCardText(text);
-        div.innerHTML = html;
-        div.style.whiteSpace = 'pre-wrap';
-        div.dataset.enhanced = "true";
-        // Inject gear icon for color settings (once per popover)
-        const itemPopover = div.closest('.item-popover');
-        if (itemPopover && !itemPopover.dataset.gearInjected) {
-            itemPopover.dataset.gearInjected = 'true';
-            const itemHead = itemPopover.querySelector('.item-popover-head');
-            if (itemHead && !itemHead.querySelector('.tooltip-gear-icon')) {
-                const gearBtn = document.createElement('button');
-                gearBtn.className = 'tooltip-gear-icon';
-                gearBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:none;border:none;color:#a0725f;cursor:pointer;font-size:18px;padding:4px;transition:color 0.2s;z-index:100;';
-                gearBtn.textContent = '⚙️';
-                gearBtn.title = 'Color Settings';
-                gearBtn.addEventListener('click', () => openColorSettings(itemPopover, true, div));
-                gearBtn.addEventListener('mouseenter', () => gearBtn.style.color = '#FFB752');
-                gearBtn.addEventListener('mouseleave', () => gearBtn.style.color = '#a0725f');
-                // Add to popover container so it positions relative to the whole popover, not the head
-                itemPopover.style.position = 'relative';
-                itemPopover.appendChild(gearBtn);
-            }
-        }
-        injectLocationButton(itemPopover);
-    }
+
+    // ---- Effect text formatting (regular items) ----
     function extractSetName(effectBlock) {
         // Try to find set name from text like "+260 damage per Rara Shell Collection set item worn"
         const m = effectBlock.match(/per\s+(.+?)\s+set\s+item/i);
@@ -1360,6 +1130,8 @@
         }
         return { html: htmlLines.join('') + setBonusHtml, totalAvg, hasAnyAvg, setBonusTotal, hasSetBonusAvg };
     }
+
+    // ---- Multiplier / control widgets (UI) ----
     function createWornControl() {
         // Control for global "Worn" multiplier used in "per X worn" patterns
         const container = document.createElement('div');
@@ -1703,6 +1475,277 @@
     function createDistinctItemControl(itemType, currentValue) {
         return createPerItemControl(itemType, currentValue);
     }
+
+    // ---- Color settings modal (UI) ----
+    function openColorSettings(sourcePopover = null, isMagicItem = false, magicCardSpan = null) {
+        // Check if settings modal already exists
+        let modal = document.getElementById('tooltipColorSettings');
+        if (modal) {
+            modal.style.display = modal.style.display === 'none' ? 'block' : 'none';
+            return;
+        }
+        // Prepare preview reference (available for all color pickers)
+        let previewEffectsDiv = null;
+        // Create modal backdrop
+        const backdrop = document.createElement('div');
+        backdrop.id = 'tooltipColorSettingsBackdrop';
+        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;';
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) {
+                backdrop.remove();
+                modal.remove();
+            }
+        });
+        // Create modal
+        modal = document.createElement('div');
+        modal.id = 'tooltipColorSettings';
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:90vw;max-height:90vh;overflow:auto;display:flex;gap:20px;';
+        // LEFT PANEL: Color pickers
+        const leftPanel = document.createElement('div');
+        leftPanel.style.cssText = 'flex:0 0 350px;';
+        const title = document.createElement('h2');
+        title.style.cssText = 'color:#FFB752;text-align:center;margin:0 0 20px 0;font-size:18px;';
+        title.textContent = isMagicItem ? 'Magic Item Color Settings' : 'Tooltip Color Settings';
+        leftPanel.appendChild(title);
+        // Add width adjustment controls (only for regular items, not magic)
+        if (!isMagicItem) {
+            const widthContainer = document.createElement('div');
+            widthContainer.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:20px;padding:10px;background:rgba(107,83,68,0.3);border-radius:4px;';
+            const widthLabel = document.createElement('span');
+            widthLabel.style.cssText = 'color:#a0725f;font-size:12px;min-width:60px;';
+            widthLabel.textContent = 'Width:';
+            const widthDisplay = document.createElement('span');
+            widthDisplay.style.cssText = 'color:#FFB752;font-size:14px;font-weight:bold;min-width:50px;text-align:center;';
+            widthDisplay.textContent = `${tooltipWidth}px`;
+            const minusBtn = document.createElement('button');
+            minusBtn.textContent = '−';
+            minusBtn.style.cssText = 'width:24px;height:24px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;cursor:pointer;border-radius:3px;';
+            minusBtn.addEventListener('click', () => {
+                tooltipWidth = Math.max(200, tooltipWidth - 20);
+                applyTooltipWidth(tooltipWidth);
+                widthDisplay.textContent = `${tooltipWidth}px`;
+                // Update preview width via wrapper
+                if (previewEffectsDiv && previewEffectsDiv._wrapper) {
+                    previewEffectsDiv._wrapper.style.width = `${tooltipWidth}px`;
+                }
+            });
+            const plusBtn = document.createElement('button');
+            plusBtn.textContent = '+';
+            plusBtn.style.cssText = 'width:24px;height:24px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;cursor:pointer;border-radius:3px;';
+            plusBtn.addEventListener('click', () => {
+                tooltipWidth += 20;
+                applyTooltipWidth(tooltipWidth);
+                widthDisplay.textContent = `${tooltipWidth}px`;
+                // Update preview width via wrapper
+                if (previewEffectsDiv && previewEffectsDiv._wrapper) {
+                    previewEffectsDiv._wrapper.style.width = `${tooltipWidth}px`;
+                }
+            });
+            widthContainer.appendChild(widthLabel);
+            widthContainer.appendChild(minusBtn);
+            widthContainer.appendChild(widthDisplay);
+            widthContainer.appendChild(plusBtn);
+            leftPanel.appendChild(widthContainer);
+        }
+        // Color settings - different for magic vs regular items
+        const colorSettings = isMagicItem ? [
+            { key: 'magicProcName', label: 'Proc Name (Highlighted)' },
+            { key: 'magicItemProc', label: 'Item Proc' },
+            { key: 'magicItemSubProc', label: 'Item Sub Proc' },
+            { key: 'magicHealingDamage', label: 'Healing & DMG Resist' }
+        ] : [
+            { key: 'itemNameHighlight', label: 'Proc Name (Highlighted)' },
+            { key: 'greenHeader', label: 'Item Proc' },
+            { key: 'tierMainEffect', label: 'Item Sub Proc' },
+            { key: 'setBonusHeader', label: 'Set Bonus Header' },
+            { key: 'tierSubEffect', label: 'Set Bonus Sub Proc' },
+            { key: 'blueAccent', label: 'Set Bonus AVG' },
+            { key: 'redAccent', label: 'AVG Proc' }
+        ];
+        const colorInputs = {};
+        for (const setting of colorSettings) {
+            const container = document.createElement('div');
+            container.style.cssText = 'margin-bottom:16px;';
+            const label = document.createElement('label');
+            label.style.cssText = 'display:block;color:#a0725f;font-size:12px;margin-bottom:6px;';
+            label.textContent = setting.label;
+            const colorPicker = document.createElement('input');
+            colorPicker.type = 'color';
+            colorPicker.value = userColors[setting.key];
+            colorPicker.style.cssText = 'width:100%;height:36px;border:1px solid #6b5344;border-radius:4px;cursor:pointer;';
+            colorInputs[setting.key] = colorPicker;
+            colorPicker.addEventListener('input', (e) => {
+                const oldColor = userColors[setting.key];
+                const newColor = e.target.value;
+                userColors[setting.key] = newColor;
+                // Live update preview with simple color swap
+                if (previewEffectsDiv) {
+                    updatePreviewColors(previewEffectsDiv, setting.key, oldColor, newColor);
+                }
+            });
+            container.appendChild(label);
+            container.appendChild(colorPicker);
+            leftPanel.appendChild(container);
+        }
+        // Button container
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.cssText = 'display:flex;gap:8px;margin-top:20px;';
+        // Apply button
+        const applyBtn = document.createElement('button');
+        applyBtn.style.cssText = 'flex:1;padding:10px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
+        applyBtn.textContent = 'Apply';
+        applyBtn.addEventListener('click', () => {
+            saveUserColors();
+            // Re-enhance all open item tooltips
+            document.querySelectorAll('.effects[data-enhanced="true"]').forEach(div => {
+                div.dataset.enhanced = '';
+                enhanceEffectsDiv(div);
+            });
+            // Re-enhance all magic cards
+            document.querySelectorAll('.item-popover-head-details span').forEach(span => {
+                if (span.dataset.enhanced) {
+                    span.dataset.enhanced = '';
+                    enhanceMagicCardDiv(span);
+                }
+            });
+            // Close modal
+            backdrop.remove();
+            modal.remove();
+        });
+        buttonContainer.appendChild(applyBtn);
+        // Reset button
+        const resetBtn = document.createElement('button');
+        resetBtn.style.cssText = 'flex:1;padding:10px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;border-radius:4px;cursor:pointer;';
+        resetBtn.textContent = 'Reset';
+        resetBtn.addEventListener('click', () => {
+            Object.assign(userColors, defaultColors);
+            for (const [key, input] of Object.entries(colorInputs)) {
+                input.value = userColors[key];
+            }
+            // Regenerate preview with fresh clone
+            if (previewEffectsDiv && sourcePopover) {
+                const sourceDiv = sourcePopover.querySelector('.effects') || sourcePopover.querySelector('.item-popover-head-details span');
+                if (sourceDiv) {
+                    const newPreview = sourceDiv.cloneNode(true);
+                    if (newPreview.classList.contains('effects')) {
+                        // Create wrapper for regular items
+                        const newWrapper = document.createElement('div');
+                        newWrapper.style.cssText = `width:${tooltipWidth}px;box-sizing:border-box;`;
+                        // Get computed font styles from source to match preview exactly
+                        const sourceStyles = window.getComputedStyle(sourceDiv);
+                        const fontCSS = `font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
+                        newPreview.style.cssText = fontCSS;
+                        newWrapper.appendChild(newPreview);
+                        previewEffectsDiv._wrapper.parentNode.replaceChild(newWrapper, previewEffectsDiv._wrapper);
+                        previewEffectsDiv = newPreview;
+                        previewEffectsDiv._wrapper = newWrapper;
+                    } else {
+                        // Magic items don't use wrapper
+                        const sourceStyles = window.getComputedStyle(sourceDiv);
+                        const fontCSS = `display:block;font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
+                        newPreview.style.cssText = fontCSS;
+                        previewEffectsDiv.parentNode.replaceChild(newPreview, previewEffectsDiv);
+                        previewEffectsDiv = newPreview;
+                    }
+                }
+            }
+        });
+        buttonContainer.appendChild(resetBtn);
+        // Close button
+        const closeBtn = document.createElement('button');
+        closeBtn.style.cssText = 'flex:1;padding:10px;background:#3a2a1f;border:1px solid #6b5344;color:#a0725f;border-radius:4px;cursor:pointer;';
+        closeBtn.textContent = 'Close';
+        closeBtn.addEventListener('click', () => {
+            backdrop.remove();
+            modal.remove();
+        });
+        buttonContainer.appendChild(closeBtn);
+        leftPanel.appendChild(buttonContainer);
+        modal.appendChild(leftPanel);
+        // RIGHT PANEL: Live preview of the actual item
+        if (sourcePopover) {
+            const rightPanel = document.createElement('div');
+            rightPanel.style.cssText = 'flex:1;min-width:300px;border:1px solid #6b5344;border-radius:4px;padding:12px;background:rgba(26,20,16,0.5);overflow-y:auto;max-height:calc(90vh - 80px);';
+            const previewTitle = document.createElement('h3');
+            previewTitle.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:14px;text-align:center;';
+            previewTitle.textContent = 'Live Preview';
+            rightPanel.appendChild(previewTitle);
+            // Clone the correct div based on item type
+            let sourceDiv;
+            if (isMagicItem && magicCardSpan) {
+                sourceDiv = magicCardSpan;
+            } else if (isMagicItem) {
+                sourceDiv = sourcePopover.querySelector('.item-popover-head-details span');
+            } else {
+                sourceDiv = sourcePopover.querySelector('.effects');
+            }
+            if (sourceDiv) {
+                previewEffectsDiv = sourceDiv.cloneNode(true);
+                if (isMagicItem) {
+                    // Get computed font styles from source to match preview exactly
+                    const sourceStyles = window.getComputedStyle(sourceDiv);
+                    const fontCSS = `display:block;font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
+                    previewEffectsDiv.style.cssText = fontCSS;
+                    rightPanel.appendChild(previewEffectsDiv);
+                } else {
+                    // Create a wrapper that mimics .item-popover-content to accurately show width
+                    const contentWrapper = document.createElement('div');
+                    contentWrapper.style.cssText = `width:${tooltipWidth}px;box-sizing:border-box;`;
+                    // Get computed font styles from source to match preview exactly
+                    const sourceStyles = window.getComputedStyle(sourceDiv);
+                    const fontCSS = `font-family:${sourceStyles.fontFamily};font-size:${sourceStyles.fontSize};font-weight:${sourceStyles.fontWeight};line-height:${sourceStyles.lineHeight};white-space:pre-wrap;`;
+                    previewEffectsDiv.style.cssText = fontCSS;
+                    contentWrapper.appendChild(previewEffectsDiv);
+                    rightPanel.appendChild(contentWrapper);
+                    // Store reference to wrapper so we can update width later
+                    previewEffectsDiv._wrapper = contentWrapper;
+                }
+            }
+            modal.appendChild(rightPanel);
+        }
+        document.body.appendChild(backdrop);
+        document.body.appendChild(modal);
+    }
+    function updatePreviewColors(previewDiv, colorKey, oldColor, newColor) {
+        if (!previewDiv) return;
+        // Simple hex color swap in the innerHTML
+        previewDiv.innerHTML = previewDiv.innerHTML.replaceAll(oldColor, newColor);
+    }
+
+    // ---- Main enhancement entry points ----
+    // These two functions are what the bootstrap MutationObserver actually calls;
+    // everything above is plumbing that these pull together per tooltip type.
+    function enhanceMagicCardDiv(div) {
+        if (div.dataset.enhanced) return;
+        let text = div.innerText.trim();
+        if (!text) return;
+        // Strip old averages (if any exist)
+        text = text.replace(/\s*\([\d,]+\s+Avg\)/g, '');
+        const { html } = formatMagicCardText(text);
+        div.innerHTML = html;
+        div.style.whiteSpace = 'pre-wrap';
+        div.dataset.enhanced = "true";
+        // Inject gear icon for color settings (once per popover)
+        const itemPopover = div.closest('.item-popover');
+        if (itemPopover && !itemPopover.dataset.gearInjected) {
+            itemPopover.dataset.gearInjected = 'true';
+            const itemHead = itemPopover.querySelector('.item-popover-head');
+            if (itemHead && !itemHead.querySelector('.tooltip-gear-icon')) {
+                const gearBtn = document.createElement('button');
+                gearBtn.className = 'tooltip-gear-icon';
+                gearBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:none;border:none;color:#a0725f;cursor:pointer;font-size:18px;padding:4px;transition:color 0.2s;z-index:100;';
+                gearBtn.textContent = '⚙️';
+                gearBtn.title = 'Color Settings';
+                gearBtn.addEventListener('click', () => openColorSettings(itemPopover, true, div));
+                gearBtn.addEventListener('mouseenter', () => gearBtn.style.color = '#FFB752');
+                gearBtn.addEventListener('mouseleave', () => gearBtn.style.color = '#a0725f');
+                // Add to popover container so it positions relative to the whole popover, not the head
+                itemPopover.style.position = 'relative';
+                itemPopover.appendChild(gearBtn);
+            }
+        }
+        injectLocationButton(itemPopover);
+    }
     function enhanceEffectsDiv(div) {
         if (div.dataset.enhanced) return;
         let text = div.innerText.trim();
@@ -1770,6 +1813,14 @@
             }
         }
     }
+
+    // ================================================================
+    // 5. BOOTSTRAP
+    // ================================================================
+    // Apply the saved tooltip width, start fetching the item-location
+    // table, and begin watching the DOM for item popovers to enhance.
+    applyTooltipWidth(tooltipWidth);
+    initItemLocations();
     const effectsObserver = new MutationObserver(() => {
         // Format equipment effect divs
         document.querySelectorAll('.effects').forEach(enhanceEffectsDiv);
