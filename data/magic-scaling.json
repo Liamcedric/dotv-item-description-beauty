@@ -1,0 +1,8 @@
+{
+  "_schema": "Map of exact in-game magic/spell name to its scaling rule. scalesFrom is 'caster' or 'hitter' — which unit's Magic stat (scraped live from the game's fetch response and cached in localStorage) the tooltip math should use.",
+  "_example Magic Name": {
+    "scalesFrom": "caster",
+    "stat": "Magic",
+    "notes": "Example: this magic's damage scales off the casting unit's Magic stat, not the unit it hits."
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "_schema": "Map of exact in-game item name to an array of drop location names. Fetched at runtime by the script via GM_xmlhttpRequest; editing this file does not require a script version bump.",
+  "_example Item Name": ["Example Raid Name", "Example Zone Name"]
+}
