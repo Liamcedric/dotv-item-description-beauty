@@ -1,14 +1,18 @@
 // ==UserScript==
 // @name         DOTV Item Description (Beauty)
 // @namespace    http://tampermonkey.net/
-// @version      4.9
+// @version      5.0
 // @license      MIT
-// @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; Fixed HTML corruption with extended proc descriptions
+// @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; item drop-location lookup
 // @author       Zaregoto_Gaming
 // @match        https://*.dragonsofthevoid.com/*
 // @match        https://play.dragonsofthevoid.com/*
 // @exclude      https://play.dragonsofthevoid.com/#/login
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @connect      raw.githubusercontent.com
 // @downloadURL  https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/item-description-beauty.user.js
 // @updateURL    https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/item-description-beauty.user.js
 // ==/UserScript==
@@ -50,6 +54,152 @@
         localStorage.setItem("tooltipAmountWorn", amountWorn);
         localStorage.setItem("tooltipPerItem", JSON.stringify(perItemStorage));
         localStorage.setItem("tooltipConditionalItems", JSON.stringify(conditionalItemsStorage));
+    }
+    // ============ ITEM LOCATION LOOKUP ============
+    const ITEM_LOCATIONS_URL = 'https://raw.githubusercontent.com/Liamcedric/dotv-item-description-beauty/main/data/item-locations.json';
+    const ITEM_LOCATIONS_CACHE_KEY = 'itemLocationsCacheV1';
+    const ITEM_LOCATIONS_CACHE_TIME_KEY = 'itemLocationsCacheTimeV1';
+    const ITEM_LOCATIONS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+    let itemLocationIndex = null;
+    function slugifyItemName(name) {
+        return name
+            .toLowerCase()
+            .replace(/'/g, '')
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+    }
+    function buildItemLocationIndex(json) {
+        // Keys look like "e.lumina-flash-armor" - the prefix is an internal
+        // category code, the item's display name always slugifies to the part after the dot.
+        const index = new Map();
+        for (const key of Object.keys(json)) {
+            const dotIndex = key.indexOf('.');
+            if (dotIndex === -1) continue;
+            index.set(key.substring(dotIndex + 1), json[key]);
+        }
+        return index;
+    }
+    function fetchItemLocationsJson() {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: ITEM_LOCATIONS_URL,
+                onload: (res) => {
+                    if (res.status >= 200 && res.status < 300) {
+                        try {
+                            resolve(JSON.parse(res.responseText));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    } else {
+                        reject(new Error('HTTP ' + res.status));
+                    }
+                },
+                onerror: reject,
+                ontimeout: reject
+            });
+        });
+    }
+    async function initItemLocations() {
+        const cachedRaw = GM_getValue(ITEM_LOCATIONS_CACHE_KEY, null);
+        const cachedTime = GM_getValue(ITEM_LOCATIONS_CACHE_TIME_KEY, 0);
+        const isFresh = cachedRaw && (Date.now() - cachedTime < ITEM_LOCATIONS_CACHE_TTL);
+        if (isFresh) {
+            try {
+                itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
+                return;
+            } catch (e) {
+                // Cache is corrupt - fall through to a fresh fetch
+            }
+        }
+        try {
+            const json = await fetchItemLocationsJson();
+            GM_setValue(ITEM_LOCATIONS_CACHE_KEY, JSON.stringify(json));
+            GM_setValue(ITEM_LOCATIONS_CACHE_TIME_KEY, Date.now());
+            itemLocationIndex = buildItemLocationIndex(json);
+        } catch (e) {
+            console.warn('DOTV Item Description: failed to fetch item location data', e);
+            if (cachedRaw) {
+                try {
+                    itemLocationIndex = buildItemLocationIndex(JSON.parse(cachedRaw));
+                } catch (e2) {
+                    // No usable data available - location buttons simply won't appear
+                }
+            }
+        }
+    }
+    initItemLocations();
+    function findItemLocation(itemName) {
+        if (!itemLocationIndex || !itemName) return null;
+        const entry = itemLocationIndex.get(slugifyItemName(itemName));
+        if (!entry || !entry.locationText) return null;
+        return entry;
+    }
+    function getItemNameFromPopover(popover) {
+        const nameSpan = popover.querySelector('.item-popover-head-details .item-name');
+        if (nameSpan) return nameSpan.textContent.trim();
+        // Magic item cards have no separate name element - the name is the
+        // first line of the card text, before the colon.
+        const detailSpan = popover.querySelector('.item-popover-head-details span');
+        if (detailSpan) {
+            const text = detailSpan.innerText || detailSpan.textContent || '';
+            const firstLine = text.split(/[\r\n;]/)[0];
+            const colonIndex = firstLine.indexOf(':');
+            return (colonIndex !== -1 ? firstLine.substring(0, colonIndex) : firstLine).trim();
+        }
+        return null;
+    }
+    function openLocationModal(itemName, entry) {
+        if (document.getElementById('itemLocationModal')) return;
+        const backdrop = document.createElement('div');
+        backdrop.id = 'itemLocationModalBackdrop';
+        backdrop.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;';
+        backdrop.addEventListener('click', (e) => {
+            if (e.target === backdrop) {
+                backdrop.remove();
+                modal.remove();
+            }
+        });
+        const modal = document.createElement('div');
+        modal.id = 'itemLocationModal';
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:500px;width:90vw;max-height:80vh;overflow:auto;';
+        const title = document.createElement('h2');
+        title.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:18px;text-align:center;text-shadow:0 0 8px rgba(255,255,255,0.5);';
+        title.textContent = itemName;
+        modal.appendChild(title);
+        const body = document.createElement('div');
+        body.style.cssText = 'color:#d4af37;font-size:13px;white-space:pre-wrap;line-height:1.5;';
+        body.textContent = entry.locationText;
+        modal.appendChild(body);
+        const closeBtn = document.createElement('button');
+        closeBtn.style.cssText = 'display:block;margin:16px auto 0;padding:8px 20px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
+        closeBtn.textContent = 'Close';
+        closeBtn.addEventListener('click', () => {
+            backdrop.remove();
+            modal.remove();
+        });
+        modal.appendChild(closeBtn);
+        document.body.appendChild(backdrop);
+        document.body.appendChild(modal);
+    }
+    function injectLocationButton(itemPopover) {
+        if (!itemPopover || itemPopover.dataset.locationInjected) return;
+        const itemName = getItemNameFromPopover(itemPopover);
+        const entry = findItemLocation(itemName);
+        if (!entry) return;
+        itemPopover.dataset.locationInjected = 'true';
+        const itemHead = itemPopover.querySelector('.item-popover-head');
+        if (!itemHead || itemHead.querySelector('.tooltip-location-icon')) return;
+        const locationBtn = document.createElement('button');
+        locationBtn.className = 'tooltip-location-icon';
+        locationBtn.style.cssText = 'position:absolute;top:8px;right:36px;background:none;border:none;color:#a0725f;cursor:pointer;font-size:16px;padding:4px;transition:color 0.2s;z-index:100;';
+        locationBtn.textContent = '📍';
+        locationBtn.title = 'Item Location';
+        locationBtn.addEventListener('click', () => openLocationModal(itemName, entry));
+        locationBtn.addEventListener('mouseenter', () => locationBtn.style.color = '#FFB752');
+        locationBtn.addEventListener('mouseleave', () => locationBtn.style.color = '#a0725f');
+        itemPopover.style.position = 'relative';
+        itemPopover.appendChild(locationBtn);
     }
     function openImageZoom(imgElement) {
         // Prevent opening if already open
@@ -874,6 +1024,7 @@
                 itemPopover.appendChild(gearBtn);
             }
         }
+        injectLocationButton(itemPopover);
     }
     function extractSetName(effectBlock) {
         // Try to find set name from text like "+260 damage per Rara Shell Collection set item worn"
@@ -1515,6 +1666,7 @@
                 itemPopover.appendChild(gearBtn);
             }
         }
+        injectLocationButton(itemPopover);
         // Inject Avg Proc and Set Bonus Total into item-popover-head
         if (hasAnyAvg || hasSetBonusAvg) {
             const itemHead = itemPopover?.querySelector('.item-popover-head');
