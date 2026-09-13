@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DOTV Item Description (Beauty)
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      5.3
 // @license      MIT
 // @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; item drop-location lookup
 // @author       Zaregoto_Gaming
@@ -1013,7 +1013,9 @@
             } else if (isIndentedDamage || isVsRaidDamage || isConditionalDamage || isPerUnitDamage) {
                 // Sub-effects: these patterns indicate sub-effects regardless of damage extraction
                 // V4.9 FIX: Append average inline during HTML generation
-                const avgHtml = effectiveAvg !== null ? ' ' + createAvgSpan(effectiveAvg, 'tierMainEffect') : '';
+                // Avg tag always uses redAccent (matches the main proc's avg color) so it
+                // stands out from the bullet's own text color (tierMainEffect/"Item Sub Proc").
+                const avgHtml = effectiveAvg !== null ? ' ' + createAvgSpan(effectiveAvg, 'redAccent') : '';
                 htmlLines.push(`<div style="margin-left:1.5em;margin-top:2px;color:${userColors.tierMainEffect};">• ${line}${avgHtml}</div>`);
             } else {
                 // Regular line - includes "+X% Stat" bonuses and other non-damage bonus lines
