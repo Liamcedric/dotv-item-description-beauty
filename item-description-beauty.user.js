@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DOTV Item Description (Beauty)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      5.1
 // @license      MIT
 // @description  Enhanced tooltips with customizable colors and width settings; per-unit, conditional, distinct item tracking; item drop-location lookup
 // @author       Zaregoto_Gaming
@@ -149,6 +149,73 @@
         }
         return null;
     }
+    // Splits text on top-level ", " (not inside parentheses, and not part of a
+    // comma-grouped number like "1,000,000" which has no space after the comma).
+    function splitTopLevelSegments(text) {
+        const segments = [];
+        let depth = 0;
+        let start = 0;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '(') depth++;
+            else if (ch === ')') depth = Math.max(0, depth - 1);
+            else if (ch === ',' && depth === 0 && text[i + 1] === ' ') {
+                segments.push(text.slice(start, i).trim());
+                start = i + 2;
+                i++;
+            }
+        }
+        segments.push(text.slice(start).trim());
+        return segments;
+    }
+    // Renders locationText into readable rows instead of one dense blob:
+    // "- " lines become bullets, ":" lines become section headers, and any
+    // line with 3+ comma-separated clauses (e.g. a multi-ingredient recipe)
+    // gets broken onto its own indented lines.
+    function renderLocationText(container, locationText) {
+        const rawLines = locationText.split('\n');
+        rawLines.forEach((rawLine) => {
+            if (rawLine.trim() === '') {
+                const spacer = document.createElement('div');
+                spacer.style.cssText = 'height:10px;';
+                container.appendChild(spacer);
+                return;
+            }
+            const bulletMatch = rawLine.match(/^\s*-\s+(.*)$/);
+            const isBullet = !!bulletMatch;
+            const content = isBullet ? bulletMatch[1] : rawLine.trim();
+            const isHeader = !isBullet && /:$/.test(content);
+            // Only break a line into multiple rows when it has 3+ top-level
+            // clauses (a real multi-ingredient list) - a normal "Item - Source,
+            // Difficulty" bullet has just one comma and should stay on one line.
+            const splitCandidates = isHeader ? [content] : splitTopLevelSegments(content);
+            const segments = splitCandidates.length >= 3 ? splitCandidates : [content];
+            segments.forEach((seg, idx) => {
+                const row = document.createElement('div');
+                const isContinuation = idx > 0;
+                let style = 'margin:2px 0;';
+                if (isHeader) {
+                    style += 'color:#FFB752;font-weight:bold;margin-top:10px;';
+                } else if (isBullet && !isContinuation) {
+                    style += 'padding-left:16px;text-indent:-16px;';
+                } else if (isContinuation) {
+                    style += isBullet ? 'padding-left:32px;' : 'padding-left:16px;';
+                    style += 'color:#c9a86a;';
+                }
+                if (isBullet && !isContinuation) {
+                    const mark = document.createElement('span');
+                    mark.textContent = '• ';
+                    mark.style.color = '#FFB752';
+                    row.appendChild(mark);
+                    row.appendChild(document.createTextNode(seg));
+                } else {
+                    row.textContent = seg;
+                }
+                row.style.cssText += style;
+                container.appendChild(row);
+            });
+        });
+    }
     function openLocationModal(itemName, entry) {
         if (document.getElementById('itemLocationModal')) return;
         const backdrop = document.createElement('div');
@@ -162,14 +229,14 @@
         });
         const modal = document.createElement('div');
         modal.id = 'itemLocationModal';
-        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:500px;width:90vw;max-height:80vh;overflow:auto;';
+        modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1410;border:2px solid #6b5344;border-radius:8px;padding:20px;z-index:10001;max-width:560px;width:92vw;max-height:80vh;overflow:auto;';
         const title = document.createElement('h2');
         title.style.cssText = 'color:#FFB752;margin:0 0 12px 0;font-size:18px;text-align:center;text-shadow:0 0 8px rgba(255,255,255,0.5);';
         title.textContent = itemName;
         modal.appendChild(title);
         const body = document.createElement('div');
-        body.style.cssText = 'color:#d4af37;font-size:13px;white-space:pre-wrap;line-height:1.5;';
-        body.textContent = entry.locationText;
+        body.style.cssText = 'color:#d4af37;font-size:13px;line-height:1.55;';
+        renderLocationText(body, entry.locationText);
         modal.appendChild(body);
         const closeBtn = document.createElement('button');
         closeBtn.style.cssText = 'display:block;margin:16px auto 0;padding:8px 20px;background:#FFB752;border:none;color:#1a1410;border-radius:4px;cursor:pointer;font-weight:bold;';
